@@ -104,6 +104,53 @@ test('inner join, filters, sort, and bound limit compile as Postgres $n', () => 
   expect(compiled.params).toEqual([true, 500, 20])
 })
 
+test('sqlite encodes boolean and Date binds; postgres keeps JS values', () => {
+  const usersSchema = 'CREATE TABLE "users" ("id" INTEGER, "email" TEXT, "active" INTEGER)'
+  const activeTrue = from(users)
+    .where(eq(users.active, true))
+    .select({ id: users.id })
+    .compile('sqlite')
+  expect(activeTrue.params).toEqual([1])
+  execSqlite(activeTrue.sql, activeTrue.params, usersSchema)
+
+  const activeFalse = from(users)
+    .where(eq(users.active, false))
+    .select({ id: users.id })
+    .compile('sqlite')
+  expect(activeFalse.params).toEqual([0])
+  execSqlite(activeFalse.sql, activeFalse.params, usersSchema)
+
+  const listed = from(users)
+    .where(inList(users.active, [true, false]))
+    .select({ id: users.id })
+    .compile('sqlite')
+  expect(listed.params).toEqual([1, 0])
+  execSqlite(listed.sql, listed.params, usersSchema)
+
+  const pgActive = from(users)
+    .where(eq(users.active, true))
+    .select({ id: users.id })
+    .compile('postgres')
+  expect(pgActive.params).toEqual([true])
+
+  const paidAt = new Date('2026-09-01T18:55:04.926Z')
+  const ordersSchema = 'CREATE TABLE "orders" ("id" INTEGER, "paidAt" TEXT)'
+  const paid = from(orders)
+    .where(eq(orders.paidAt, paidAt))
+    .select({ id: orders.id })
+    .compile('sqlite')
+  expect(paid.params).toEqual([paidAt.toISOString()])
+  expect(typeof paid.params[0]).toBe('string')
+  execSqlite(paid.sql, paid.params, ordersSchema)
+
+  const listedDates = from(orders)
+    .where(inList(orders.paidAt, [paidAt]))
+    .select({ id: orders.id })
+    .compile('sqlite')
+  expect(listedDates.params).toEqual([paidAt.toISOString()])
+  execSqlite(listedDates.sql, listedDates.params, ordersSchema)
+})
+
 test('sqlite uses ? placeholders and LIMIT -1 before a lone OFFSET', () => {
   const sqlite = from(users)
     .where(eq(users.email, 'a@b.c'))

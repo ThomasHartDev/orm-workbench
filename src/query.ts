@@ -79,12 +79,18 @@ export function not(pred: Predicate): Predicate {
   return { kind: 'not', pred }
 }
 
+function encodeSqlite(value: unknown): unknown {
+  if (typeof value === 'boolean') return value ? 1 : 0
+  if (value instanceof Date) return value.toISOString()
+  return value
+}
+
 class Binder {
   readonly params: unknown[] = []
   constructor(private readonly dialect: Dialect) {}
 
   push(value: unknown): string {
-    this.params.push(value)
+    this.params.push(this.dialect === 'sqlite' ? encodeSqlite(value) : value)
     if (this.dialect === 'sqlite') return '?'
     return `$${this.params.length}`
   }
