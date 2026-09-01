@@ -44,6 +44,32 @@ function execSqlite(sql: string, params: unknown[], schema: string): void {
   }
 }
 
+test('CI and package engines pin Node 22 so node:sqlite is a hard require', () => {
+  const proc = (
+    globalThis as {
+      process?: {
+        versions?: { node?: string }
+        getBuiltinModule?: (id: string) => {
+          readFileSync: (path: string, encoding: string) => string
+        }
+      }
+    }
+  ).process
+  const major = Number((proc?.versions?.node ?? '0').split('.')[0])
+  expect(major).toBeGreaterThanOrEqual(22)
+  const fs = proc?.getBuiltinModule?.('node:fs')
+  if (!fs) {
+    throw new Error('node:fs is not available in this runtime')
+  }
+  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')) as {
+    engines?: { node?: string }
+  }
+  expect(pkg.engines?.node).toBe('>=22')
+  const ci = fs.readFileSync('.github/workflows/ci.yml', 'utf8')
+  expect(ci).toMatch(/node-version:\s*22\b/)
+  expect(ci).not.toMatch(/node-version:\s*20\b/)
+})
+
 test('binds values and never interpolates them into SQL', () => {
   const poison = "open'; DROP TABLE orders;--"
   const compiled = from(orders)

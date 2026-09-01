@@ -4,6 +4,9 @@
   "description": "A deep dive into ORMs and hard relational design: build a small type-safe ORM from scratch (query builder, migrations, relations, unit-of-work) AND model a genuinely complex schema (multi-tenant, temporal/bitemporal, hierarchies, money, soft-delete) showing where the ORM helps and where you drop to hand-tuned SQL. Coordinates ORM internals with real database-design decisions.",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
