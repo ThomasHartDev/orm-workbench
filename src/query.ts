@@ -6,7 +6,6 @@ export type PreparedQuery<TRow> = {
   sql: string
   params: unknown[]
   dialect: Dialect
-  rowType?: TRow
 }
 
 type CmpOp = '=' | '<>' | '>' | '>=' | '<' | '<='
@@ -118,7 +117,7 @@ function compilePred(pred: Predicate, bind: Binder): string {
       if (pred.parts.length === 0) return '1 = 0'
       return `(${pred.parts.map((part) => compilePred(part, bind)).join(' OR ')})`
     case 'not':
-      return `(NOT ${compilePred(pred.pred, bind)})`
+      return `(NOT (${compilePred(pred.pred, bind)}))`
   }
 }
 
@@ -231,7 +230,12 @@ export class SelectQuery<TRow> {
       const order = this.state.orderBy.map((item) => `${colSql(item.col)} ${item.dir}`).join(', ')
       parts.push(`ORDER BY ${order}`)
     }
-    if (this.state.limit !== undefined) parts.push(`LIMIT ${bind.push(this.state.limit)}`)
+    if (this.state.limit !== undefined) {
+      parts.push(`LIMIT ${bind.push(this.state.limit)}`)
+    } else if (dialect === 'sqlite' && this.state.offset !== undefined) {
+      // SQLite is LIMIT expr [OFFSET expr]; -1 is unbounded so OFFSET can stand alone.
+      parts.push('LIMIT -1')
+    }
     if (this.state.offset !== undefined) parts.push(`OFFSET ${bind.push(this.state.offset)}`)
     return { sql: parts.join('\n'), params: bind.params, dialect }
   }

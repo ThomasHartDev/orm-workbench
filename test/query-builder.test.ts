@@ -20,6 +20,30 @@ const orders = defineTable('orders', {
   amount: numeric(),
 })
 
+type SqliteDb = {
+  exec: (sql: string) => void
+  prepare: (sql: string) => { all: (...params: unknown[]) => unknown }
+  close: () => void
+}
+
+function execSqlite(sql: string, params: unknown[], schema: string): void {
+  const loaded = (
+    globalThis as {
+      process?: { getBuiltinModule?: (id: string) => { DatabaseSync: new (path: string) => SqliteDb } }
+    }
+  ).process?.getBuiltinModule?.('node:sqlite')
+  if (!loaded) {
+    throw new Error('node:sqlite is not available in this runtime')
+  }
+  const db = new loaded.DatabaseSync(':memory:')
+  try {
+    db.exec(schema)
+    db.prepare(sql).all(...params)
+  } finally {
+    db.close()
+  }
+}
+
 test('binds values and never interpolates them into SQL', () => {
   const poison = "open'; DROP TABLE orders;--"
   const compiled = from(orders)
@@ -54,16 +78,47 @@ test('inner join, filters, sort, and bound limit compile as Postgres $n', () => 
   expect(compiled.params).toEqual([true, 500, 20])
 })
 
-test('sqlite uses ? placeholders; left join, null, like, and NOT nest', () => {
+test('sqlite uses ? placeholders and LIMIT -1 before a lone OFFSET', () => {
   const sqlite = from(users)
     .where(eq(users.email, 'a@b.c'))
     .select({ email: users.email })
     .offset(3)
     .compile('sqlite')
-  expect(sqlite.sql).toContain('WHERE "users"."email" = ?')
-  expect(sqlite.sql).toContain('OFFSET ?')
+  expect(sqlite.sql.split('\n')).toEqual([
+    'SELECT "users"."email" AS "email"',
+    'FROM "users" AS "users"',
+    'WHERE "users"."email" = ?',
+    'LIMIT -1',
+    'OFFSET ?',
+  ])
   expect(sqlite.sql).not.toMatch(/\$\d/)
   expect(sqlite.params).toEqual(['a@b.c', 3])
+
+  const withLimit = from(users)
+    .select({ email: users.email })
+    .limit(10)
+    .offset(3)
+    .compile('sqlite')
+  expect(withLimit.sql).toContain('LIMIT ?')
+  expect(withLimit.sql).toContain('OFFSET ?')
+  expect(withLimit.sql).not.toContain('LIMIT -1')
+  expect(withLimit.params).toEqual([10, 3])
+
+  const usersSchema = 'CREATE TABLE "users" ("id" INTEGER, "email" TEXT, "active" INTEGER)'
+  execSqlite(sqlite.sql, sqlite.params, usersSchema)
+  execSqlite(withLimit.sql, withLimit.params, usersSchema)
+  const bareOffset = sqlite.sql.replace('\nLIMIT -1', '')
+  expect(() => execSqlite(bareOffset, sqlite.params, usersSchema)).toThrow(/syntax error/i)
+})
+
+test('postgres allows OFFSET without LIMIT; nested boolean, left join, null, like, NOT', () => {
+  const offsetOnly = from(users)
+    .select({ email: users.email })
+    .offset(3)
+    .compile('postgres')
+  expect(offsetOnly.sql).toContain('OFFSET $1')
+  expect(offsetOnly.sql).not.toContain('LIMIT')
+  expect(offsetOnly.params).toEqual([3])
 
   const nested = from(orders)
     .leftJoin(users, eq(orders.userId, users.id))
@@ -73,7 +128,7 @@ test('sqlite uses ? placeholders; left join, null, like, and NOT nest', () => {
   expect(nested.sql).toContain('LEFT JOIN "users" AS "users"')
   expect(nested.sql).toContain('"orders"."paidAt" IS NULL')
   expect(nested.sql).toContain('"orders"."note" LIKE $1')
-  expect(nested.sql).toContain('(NOT "orders"."status" = $2)')
+  expect(nested.sql).toContain('(NOT ("orders"."status" = $2))')
   expect(nested.params).toEqual(['%rush%', 'void'])
 })
 
