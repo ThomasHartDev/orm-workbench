@@ -172,6 +172,14 @@ function columnSql(col: FieldDef, dialect: Dialect, inlineRefs: boolean): string
   }
   return parts.join(' ')
 }
+function isNullSqlDefault(sql: string): boolean {
+  return sql.trim().toUpperCase() === 'NULL'
+}
+function isNonConstantSqlDefault(sql: string): boolean {
+  const trimmed = sql.trim()
+  if (/^CURRENT_(?:TIME|DATE|TIMESTAMP)$/i.test(trimmed)) return true
+  return trimmed.startsWith('(')
+}
 export function compileOps(ops: readonly MigrationOp[], dialect: Dialect): string[] {
   return ops.map((op) => {
     switch (op.kind) {
@@ -190,8 +198,20 @@ export function compileOps(ops: readonly MigrationOp[], dialect: Dialect): strin
       case 'addColumn':
         if (op.column.primaryKey) throw new Error('Cannot ADD COLUMN PRIMARY KEY; rebuild the table')
         if (op.column.unique && dialect === 'sqlite') throw new Error('SQLite cannot ADD COLUMN UNIQUE; add a unique index')
-        if (dialect === 'sqlite' && !op.column.nullable && op.column.defaultSql === undefined) {
-          throw new Error('SQLite cannot ADD COLUMN NOT NULL without DEFAULT')
+        if (dialect === 'sqlite') {
+          if (!op.column.nullable && op.column.defaultSql === undefined) {
+            throw new Error('SQLite cannot ADD COLUMN NOT NULL without DEFAULT')
+          }
+          if (
+            op.column.references &&
+            op.column.defaultSql !== undefined &&
+            !isNullSqlDefault(op.column.defaultSql)
+          ) {
+            throw new Error('SQLite cannot ADD COLUMN REFERENCES with a non-NULL default')
+          }
+          if (op.column.defaultSql !== undefined && isNonConstantSqlDefault(op.column.defaultSql)) {
+            throw new Error('SQLite cannot ADD COLUMN with a non-constant default')
+          }
         }
         return `ALTER TABLE ${quoteIdent(op.table)} ADD COLUMN ${columnSql(op.column, dialect, true)}`
       case 'dropColumn':

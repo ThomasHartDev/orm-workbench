@@ -215,3 +215,160 @@ test('migrator applies, skips, rolls back, and walks down against sqlite', () =>
   expect(stmts.some((sql) => sql.includes('VALUES ($1, $2)'))).toBe(true)
   expect(stmts.every((sql) => !sql.includes('?'))).toBe(true)
 })
+
+test('sqlite addColumn rejects FK non-NULL defaults and non-constant defaults', () => {
+  const fkTarget = { table: 'users', column: 'id', onDelete: 'restrict' as const }
+  const fkNotNullDefault = {
+    kind: 'addColumn' as const,
+    table: 'posts',
+    column: {
+      name: 'userId',
+      kind: 'integer' as const,
+      nullable: false,
+      primaryKey: false,
+      unique: false,
+      defaultSql: '1',
+      references: fkTarget,
+    },
+  }
+  const fkNullableDefault = {
+    kind: 'addColumn' as const,
+    table: 'posts',
+    column: {
+      name: 'userId',
+      kind: 'integer' as const,
+      nullable: true,
+      primaryKey: false,
+      unique: false,
+      defaultSql: '1',
+      references: fkTarget,
+    },
+  }
+  const currentTs = {
+    kind: 'addColumn' as const,
+    table: 'posts',
+    column: {
+      name: 'paidAt',
+      kind: 'timestamptz' as const,
+      nullable: true,
+      primaryKey: false,
+      unique: false,
+      defaultSql: 'CURRENT_TIMESTAMP',
+    },
+  }
+  const exprDefault = {
+    kind: 'addColumn' as const,
+    table: 'posts',
+    column: {
+      name: 'n',
+      kind: 'integer' as const,
+      nullable: true,
+      primaryKey: false,
+      unique: false,
+      defaultSql: '(1+1)',
+    },
+  }
+  const constOne = {
+    kind: 'addColumn' as const,
+    table: 'posts',
+    column: { name: 'n', kind: 'integer' as const, nullable: true, primaryKey: false, unique: false, defaultSql: '1' },
+  }
+  const constX = {
+    kind: 'addColumn' as const,
+    table: 'posts',
+    column: { name: 'tag', kind: 'text' as const, nullable: true, primaryKey: false, unique: false, defaultSql: "'x'" },
+  }
+  const fkNullDefault = {
+    kind: 'addColumn' as const,
+    table: 'posts',
+    column: {
+      name: 'userId',
+      kind: 'integer' as const,
+      nullable: true,
+      primaryKey: false,
+      unique: false,
+      defaultSql: 'NULL',
+      references: fkTarget,
+    },
+  }
+
+  expect(() => compileOps([fkNotNullDefault], 'sqlite')).toThrow(/ADD COLUMN REFERENCES.*non-NULL default/)
+  expect(() => compileOps([fkNullableDefault], 'sqlite')).toThrow(/ADD COLUMN REFERENCES.*non-NULL default/)
+  expect(() => compileOps([currentTs], 'sqlite')).toThrow(/non-constant default/)
+  expect(() =>
+    compileOps([{ ...currentTs, column: { ...currentTs.column, defaultSql: 'current_timestamp' } }], 'sqlite'),
+  ).toThrow(/non-constant default/)
+  expect(() =>
+    compileOps([{ ...currentTs, column: { ...currentTs.column, defaultSql: 'CURRENT_DATE' } }], 'sqlite'),
+  ).toThrow(/non-constant default/)
+  expect(() => compileOps([exprDefault], 'sqlite')).toThrow(/non-constant default/)
+  expect(compileOps([constOne], 'sqlite')[0]).toContain('DEFAULT 1')
+  expect(compileOps([constX], 'sqlite')[0]).toContain("DEFAULT 'x'")
+  expect(compileOps([fkNullDefault], 'sqlite')[0]).toContain('REFERENCES')
+  expect(compileOps([fkNotNullDefault], 'postgres')[0]).toContain('DEFAULT 1')
+  expect(compileOps([currentTs], 'postgres')[0]).toContain('CURRENT_TIMESTAMP')
+
+  const createdWithFkDefault = defineSchema({
+    users: table({ id: col.integer().primaryKey() }),
+    orders: table({
+      id: col.integer().primaryKey(),
+      userId: col.integer().defaultSql('1').references('users', 'id'),
+    }),
+  })
+  const createSql = compileOps(diffSchema(empty, createdWithFkDefault), 'sqlite')
+  expect(createSql[1]).toContain('DEFAULT 1')
+  expect(createSql[1]).toContain('FOREIGN KEY ("userId") REFERENCES "users" ("id")')
+
+  const base = defineSchema({
+    users: table({ id: col.integer().primaryKey() }),
+    posts: table({ id: col.integer().primaryKey() }),
+  })
+  const withNullableFk = defineSchema({
+    users: table({ id: col.integer().primaryKey() }),
+    posts: table({
+      id: col.integer().primaryKey(),
+      userId: col.integer().nullable().references('users', 'id'),
+    }),
+  })
+
+  const { session, close } = sqlite()
+  try {
+    const m = new Migrator(session, 'sqlite')
+    const start = [migration('001_base', empty, base)]
+    expect(m.migrateUp(start)).toEqual(['001_base'])
+    session.exec(`INSERT INTO "users" ("id") VALUES (1)`)
+    session.exec(`INSERT INTO "posts" ("id") VALUES (1)`)
+    expect(() => m.migrateUp([...start, { id: '002_fk_nn', up: [fkNotNullDefault], down: [] }])).toThrow(
+      /ADD COLUMN REFERENCES.*non-NULL default/,
+    )
+    expect(() => m.migrateUp([...start, { id: '002_fk_d', up: [fkNullableDefault], down: [] }])).toThrow(
+      /ADD COLUMN REFERENCES.*non-NULL default/,
+    )
+    expect(() => m.migrateUp([...start, { id: '002_ts', up: [currentTs], down: [] }])).toThrow(/non-constant default/)
+    expect(() => m.migrateUp([...start, { id: '002_expr', up: [exprDefault], down: [] }])).toThrow(/non-constant default/)
+    expect(m.applied()).toEqual(['001_base'])
+
+    const addFk = [...start, migration('002_fk_null', base, withNullableFk)]
+    expect(m.migrateUp(addFk)).toEqual(['002_fk_null'])
+    expect(session.all(`SELECT "userId" FROM "posts"`)).toEqual([{ userId: null }])
+    session.exec(`UPDATE "posts" SET "userId" = 1 WHERE "id" = 1`)
+    expect(session.all(`SELECT "userId" FROM "posts"`)).toEqual([{ userId: 1 }])
+
+    const addConsts = [...addFk, { id: '003_consts', up: [constOne, constX], down: [] }]
+    expect(m.migrateUp(addConsts)).toEqual(['003_consts'])
+    expect(session.all(`SELECT "n", "tag" FROM "posts"`)).toEqual([{ n: 1, tag: 'x' }])
+  } finally {
+    close()
+  }
+
+  const created = sqlite()
+  try {
+    const m = new Migrator(created.session, 'sqlite')
+    expect(m.migrateUp([migration('001_fk_default', empty, createdWithFkDefault)])).toEqual(['001_fk_default'])
+    created.session.exec(`INSERT INTO "users" ("id") VALUES (1)`)
+    created.session.exec(`INSERT INTO "orders" ("id") VALUES (1)`)
+    expect(created.session.all(`SELECT "userId" FROM "orders"`)).toEqual([{ userId: 1 }])
+  } finally {
+    created.close()
+  }
+})
