@@ -199,8 +199,11 @@ export function compileOps(ops: readonly MigrationOp[], dialect: Dialect): strin
         if (op.column.primaryKey) throw new Error('Cannot ADD COLUMN PRIMARY KEY; rebuild the table')
         if (op.column.unique && dialect === 'sqlite') throw new Error('SQLite cannot ADD COLUMN UNIQUE; add a unique index')
         if (dialect === 'sqlite') {
-          if (!op.column.nullable && op.column.defaultSql === undefined) {
-            throw new Error('SQLite cannot ADD COLUMN NOT NULL without DEFAULT')
+          if (
+            !op.column.nullable &&
+            (op.column.defaultSql === undefined || isNullSqlDefault(op.column.defaultSql))
+          ) {
+            throw new Error('SQLite cannot ADD COLUMN NOT NULL without a non-NULL DEFAULT')
           }
           if (
             op.column.references &&

@@ -152,8 +152,32 @@ test('sqlite drops indexes before columns and rejects unsafe ALTER TABLE', () =>
     table: 't',
     column: { name: 'n', kind: 'text' as const, nullable: false, primaryKey: false, unique: false },
   }
+  const notNullNullDefault = {
+    kind: 'addColumn' as const,
+    table: 't',
+    column: {
+      name: 'n',
+      kind: 'text' as const,
+      nullable: false,
+      primaryKey: false,
+      unique: false,
+      defaultSql: 'NULL',
+    },
+  }
   expect(() => compileOps([notNullAdd], 'sqlite')).toThrow(/NOT NULL/)
+  expect(() => compileOps([notNullNullDefault], 'sqlite')).toThrow(/NOT NULL/)
+  expect(() =>
+    compileOps([{ ...notNullNullDefault, column: { ...notNullNullDefault.column, defaultSql: 'null' } }], 'sqlite'),
+  ).toThrow(/non-NULL DEFAULT/)
   expect(compileOps([notNullAdd], 'postgres')[0]).toContain('NOT NULL')
+  expect(compileOps([notNullNullDefault], 'postgres')[0]).toContain('DEFAULT NULL')
+
+  const createdNnNull = defineSchema({
+    t: table({ id: col.integer().primaryKey(), n: col.text().defaultSql('NULL') }),
+  })
+  const createdNnNullSql = compileOps(diffSchema(empty, createdNnNull), 'sqlite')[0]
+  expect(createdNnNullSql).toContain('"n" TEXT NOT NULL')
+  expect(createdNnNullSql).toContain('DEFAULT NULL')
 
   const withNote = defineSchema({
     items: table({ id: col.integer().primaryKey(), note: col.text().nullable() }),
@@ -172,6 +196,9 @@ test('sqlite drops indexes before columns and rejects unsafe ALTER TABLE', () =>
     expect(() => m.migrateUp([...dropLabel, { id: '003_pk', up: diffSchema(pkTable, noPk), down: [] }])).toThrow(/PRIMARY KEY/)
     expect(() => m.migrateUp([...dropLabel, { id: '003_fk', up: diffSchema(withFk, noFk), down: [] }])).toThrow(/foreign key/)
     expect(() => m.migrateUp([...dropLabel, { id: '003_nn', up: [notNullAdd], down: [] }])).toThrow(/NOT NULL/)
+    expect(() => m.migrateUp([...dropLabel, { id: '003_nn_null', up: [notNullNullDefault], down: [] }])).toThrow(
+      /NOT NULL/,
+    )
     const noteChain = [...dropLabel, migration('003_note', stripped, withNote)]
     expect(m.migrateUp(noteChain)).toEqual(['003_note'])
     expect(session.all(`SELECT "note" FROM "items"`)).toEqual([{ note: null }])
@@ -179,6 +206,16 @@ test('sqlite drops indexes before columns and rejects unsafe ALTER TABLE', () =>
     expect(session.all(`SELECT "id" FROM "items"`)).toEqual([{ id: 1 }])
   } finally {
     close()
+  }
+
+  const created = sqlite()
+  try {
+    const m = new Migrator(created.session, 'sqlite')
+    expect(m.migrateUp([migration('001_nn_null', empty, createdNnNull)])).toEqual(['001_nn_null'])
+    created.session.exec(`INSERT INTO "t" ("id", "n") VALUES (1, 'ok')`)
+    expect(created.session.all(`SELECT "id", "n" FROM "t"`)).toEqual([{ id: 1, n: 'ok' }])
+  } finally {
+    created.close()
   }
 })
 
