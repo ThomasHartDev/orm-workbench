@@ -100,10 +100,17 @@ export function defineSchema(drafts: Record<string, TableDraft>): DatabaseSchema
       if (target.kind !== c.kind) {
         throw new Error(`${t.name}.${c.name} type ${c.kind} does not match ${ref.table}.${ref.column} (${target.kind})`)
       }
+      if (!isUniqueFkTarget(parent, target)) {
+        throw new Error(`${t.name}.${c.name} references non-unique column ${ref.table}.${ref.column}`)
+      }
     }
   }
   topoTables(tables)
   return { tables }
+}
+function isUniqueFkTarget(parent: TableSchema, target: FieldDef): boolean {
+  if (target.primaryKey || target.unique) return true
+  return parent.indexes.some((idx) => idx.unique && idx.columns.length === 1 && idx.columns[0] === target.name)
 }
 export function topoTables(tables: readonly TableSchema[]): TableSchema[] {
   const byName = new Map(tables.map((t) => [t.name, t]))

@@ -85,6 +85,38 @@ test('schema DSL rejects cycles, bad defaults, and in-place column rewrites', ()
   expect(() => compileOps([{ kind: 'addColumn', table: 't', column: uniqCol }], 'sqlite')).toThrow(/UNIQUE/)
 })
 
+test('defineSchema requires unique or primary-key FK parents', () => {
+  expect(() =>
+    defineSchema({
+      users: table({ id: col.integer().primaryKey(), email: col.text() }),
+      orders: table({ id: col.integer().primaryKey(), email: col.text().references('users', 'email') }),
+    }),
+  ).toThrow(/orders\.email.*users\.email/)
+
+  const byPk = defineSchema({
+    users: table({ id: col.integer().primaryKey() }),
+    orders: table({ id: col.integer().primaryKey(), userId: col.integer().references('users', 'id') }),
+  })
+  expect(byPk.tables.map((t) => t.name).sort()).toEqual(['orders', 'users'])
+
+  const byUniqueIndex = defineSchema({
+    users: table({ id: col.integer().primaryKey(), email: col.text() }).index('users_email_uq', ['email'], { unique: true }),
+    orders: table({ id: col.integer().primaryKey(), email: col.text().references('users', 'email') }),
+  })
+  expect(byUniqueIndex.tables).toHaveLength(2)
+
+  const { session, close } = sqlite()
+  try {
+    const m = new Migrator(session, 'sqlite')
+    expect(m.migrateUp([migration('001_fk_idx', empty, byUniqueIndex)])).toEqual(['001_fk_idx'])
+    session.exec(`INSERT INTO "users" ("id", "email") VALUES (1, 'a@b.com')`)
+    session.exec(`INSERT INTO "orders" ("id", "email") VALUES (1, 'a@b.com')`)
+    expect(session.all(`SELECT "email" FROM "orders"`)).toEqual([{ email: 'a@b.com' }])
+  } finally {
+    close()
+  }
+})
+
 test('sqlite drops indexes before columns and rejects unsafe ALTER TABLE', () => {
   const indexed = defineSchema({
     items: table({ id: col.integer().primaryKey(), label: col.text() }).index('items_label_idx', ['label']),
