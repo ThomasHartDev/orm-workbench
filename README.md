@@ -8,23 +8,45 @@ Most ORM tutorials stop at `findMany`. This repo goes the other way. It builds t
 
 ## Concepts demonstrated
 
-- Relational algebra for SELECT, projection, selection, and join
+- Relational algebra: projection (`SELECT`), selection (`WHERE`), and join
 - Prepared statements and bind parameters (SQL injection resistance)
-- Identifier quoting vs value binding
-- SQL three-valued logic (`= NULL` is unknown)
-- Dialect-specific parameter placeholders (`$1` vs `?`)
+- Identifier quoting versus value binding
+- SQL three-valued logic (`= NULL` is unknown; use `IS NULL`)
+- Dialect-specific placeholders (`$n` for Postgres, `?` for SQLite)
+- Phantom types so column refs carry their TypeScript value type
+- Immutable query values (each clause returns a new builder)
+- Empty `IN ()` as a false predicate, because that list is not valid SQL
 
 ## What's implemented
 
-- Project scaffold (TypeScript, Vitest, GitHub Actions CI)
+- Type-safe SELECT/WHERE/JOIN query builder with prepared-statement binding
 
 ## Usage
 
 ```ts
-import { version } from 'orm-workbench'
+import { and, boolean, defineTable, eq, from, gt, integer, text } from 'orm-workbench'
 
-console.log(version)
+const users = defineTable('users', {
+  id: integer(),
+  email: text(),
+  active: boolean(),
+})
+const orders = defineTable('orders', {
+  id: integer(),
+  userId: integer(),
+  totalCents: integer(),
+})
+
+const compiled = from(orders)
+  .innerJoin(users, eq(orders.userId, users.id))
+  .where(and(eq(users.active, true), gt(orders.totalCents, 500)))
+  .select({ orderId: orders.id, email: users.email })
+  .orderBy(orders.id, 'desc')
+  .limit(20)
+  .compile('postgres')
 ```
+
+`compiled.sql` is parameterized. `compiled.params` is `[true, 500, 20]`.
 
 ```bash
 pnpm install
