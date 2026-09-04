@@ -141,7 +141,7 @@ export type MigrationOp =
   | { kind: 'createTable'; table: TableSchema }
   | { kind: 'dropTable'; name: string }
   | { kind: 'addColumn'; table: string; column: FieldDef }
-  | { kind: 'dropColumn'; table: string; column: string }
+  | { kind: 'dropColumn'; table: string; column: FieldDef }
   | { kind: 'createIndex'; table: string; index: IndexDef }
   | { kind: 'dropIndex'; name: string }
 
@@ -183,9 +183,17 @@ export function compileOps(ops: readonly MigrationOp[], dialect: Dialect): strin
       case 'addColumn':
         if (op.column.primaryKey) throw new Error('Cannot ADD COLUMN PRIMARY KEY; rebuild the table')
         if (op.column.unique && dialect === 'sqlite') throw new Error('SQLite cannot ADD COLUMN UNIQUE; add a unique index')
+        if (dialect === 'sqlite' && !op.column.nullable && op.column.defaultSql === undefined) {
+          throw new Error('SQLite cannot ADD COLUMN NOT NULL without DEFAULT')
+        }
         return `ALTER TABLE ${quoteIdent(op.table)} ADD COLUMN ${columnSql(op.column, dialect, true)}`
       case 'dropColumn':
-        return `ALTER TABLE ${quoteIdent(op.table)} DROP COLUMN ${quoteIdent(op.column)}`
+        if (dialect === 'sqlite') {
+          if (op.column.primaryKey) throw new Error('SQLite cannot DROP COLUMN PRIMARY KEY; rebuild the table')
+          if (op.column.unique) throw new Error('SQLite cannot DROP COLUMN UNIQUE; rebuild the table')
+          if (op.column.references) throw new Error('SQLite cannot DROP COLUMN with a foreign key; rebuild the table')
+        }
+        return `ALTER TABLE ${quoteIdent(op.table)} DROP COLUMN ${quoteIdent(op.column.name)}`
       case 'createIndex': {
         const uniq = op.index.unique ? 'UNIQUE ' : ''
         return `CREATE ${uniq}INDEX ${quoteIdent(op.index.name)} ON ${quoteIdent(op.table)} (${op.index.columns.map(quoteIdent).join(', ')})`

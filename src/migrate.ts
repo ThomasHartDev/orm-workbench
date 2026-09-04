@@ -26,6 +26,7 @@ export function diffSchema(from: DatabaseSchema, to: DatabaseSchema): MigrationO
   const prev = tableMap(from)
   const created = to.tables.filter((t) => !prev.has(t.name))
   const dropped = from.tables.filter((t) => !to.tables.some((x) => x.name === t.name))
+  const droppedIndexes = new Set<string>()
   for (const table of topoTables(created)) {
     ops.push({ kind: 'createTable', table: { name: table.name, columns: table.columns, indexes: [] } })
   }
@@ -39,8 +40,15 @@ export function diffSchema(from: DatabaseSchema, to: DatabaseSchema): MigrationO
       if (!old) ops.push({ kind: 'addColumn', table: table.name, column: col })
       else if (!fieldEq(old, col)) throw new Error(`Cannot alter column ${table.name}.${col.name} in place; drop and add it`)
     }
-    for (const col of before.columns) {
-      if (!afterCols.has(col.name)) ops.push({ kind: 'dropColumn', table: table.name, column: col.name })
+    const removed = before.columns.filter((c) => !afterCols.has(c.name))
+    const removedNames = new Set(removed.map((c) => c.name))
+    for (const idx of before.indexes) {
+      if (!idx.columns.some((name) => removedNames.has(name)) || droppedIndexes.has(idx.name)) continue
+      ops.push({ kind: 'dropIndex', name: idx.name })
+      droppedIndexes.add(idx.name)
+    }
+    for (const col of removed) {
+      ops.push({ kind: 'dropColumn', table: table.name, column: col })
     }
   }
   for (const table of to.tables) {
@@ -55,16 +63,25 @@ export function diffSchema(from: DatabaseSchema, to: DatabaseSchema): MigrationO
       const old = oldIdx.get(idx.name)
       if (!old) ops.push({ kind: 'createIndex', table: table.name, index: idx })
       else if (!indexEq(old, idx)) {
-        ops.push({ kind: 'dropIndex', name: idx.name })
+        if (!droppedIndexes.has(idx.name)) {
+          ops.push({ kind: 'dropIndex', name: idx.name })
+          droppedIndexes.add(idx.name)
+        }
         ops.push({ kind: 'createIndex', table: table.name, index: idx })
       }
     }
     for (const idx of before.indexes) {
-      if (!newIdx.has(idx.name)) ops.push({ kind: 'dropIndex', name: idx.name })
+      if (newIdx.has(idx.name) || droppedIndexes.has(idx.name)) continue
+      ops.push({ kind: 'dropIndex', name: idx.name })
+      droppedIndexes.add(idx.name)
     }
   }
   for (const table of [...topoTables(dropped)].reverse()) {
-    for (const idx of table.indexes) ops.push({ kind: 'dropIndex', name: idx.name })
+    for (const idx of table.indexes) {
+      if (droppedIndexes.has(idx.name)) continue
+      ops.push({ kind: 'dropIndex', name: idx.name })
+      droppedIndexes.add(idx.name)
+    }
     ops.push({ kind: 'dropTable', name: table.name })
   }
   return ops

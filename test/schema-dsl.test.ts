@@ -85,6 +85,71 @@ test('schema DSL rejects cycles, bad defaults, and in-place column rewrites', ()
   expect(() => compileOps([{ kind: 'addColumn', table: 't', column: uniqCol }], 'sqlite')).toThrow(/UNIQUE/)
 })
 
+test('sqlite drops indexes before columns and rejects unsafe ALTER TABLE', () => {
+  const indexed = defineSchema({
+    items: table({ id: col.integer().primaryKey(), label: col.text() }).index('items_label_idx', ['label']),
+  })
+  const stripped = defineSchema({
+    items: table({ id: col.integer().primaryKey() }),
+  })
+  const dropIndexed = diffSchema(indexed, stripped)
+  expect(dropIndexed.map((op) => op.kind)).toEqual(['dropIndex', 'dropColumn'])
+  expect(dropIndexed.filter((op) => op.kind === 'dropIndex')).toHaveLength(1)
+  expect(dropIndexed[1] && dropIndexed[1].kind === 'dropColumn' ? dropIndexed[1].column.name : '').toBe('label')
+
+  const uniqueCol = defineSchema({ t: table({ id: col.integer().primaryKey(), email: col.text().unique() }) })
+  const noUnique = defineSchema({ t: table({ id: col.integer().primaryKey() }) })
+  expect(() => compileOps(diffSchema(uniqueCol, noUnique), 'sqlite')).toThrow(/UNIQUE/)
+
+  const pkTable = defineSchema({ t: table({ id: col.integer().primaryKey(), name: col.text() }) })
+  const noPk = defineSchema({ t: table({ name: col.text() }) })
+  expect(() => compileOps(diffSchema(pkTable, noPk), 'sqlite')).toThrow(/PRIMARY KEY/)
+
+  const withFk = defineSchema({
+    users: table({ id: col.integer().primaryKey() }),
+    orders: table({ id: col.integer().primaryKey(), userId: col.integer().references('users', 'id') }),
+  })
+  const noFk = defineSchema({
+    users: table({ id: col.integer().primaryKey() }),
+    orders: table({ id: col.integer().primaryKey() }),
+  })
+  expect(() => compileOps(diffSchema(withFk, noFk), 'sqlite')).toThrow(/foreign key/)
+
+  const notNullAdd = {
+    kind: 'addColumn' as const,
+    table: 't',
+    column: { name: 'n', kind: 'text' as const, nullable: false, primaryKey: false, unique: false },
+  }
+  expect(() => compileOps([notNullAdd], 'sqlite')).toThrow(/NOT NULL/)
+  expect(compileOps([notNullAdd], 'postgres')[0]).toContain('NOT NULL')
+
+  const withNote = defineSchema({
+    items: table({ id: col.integer().primaryKey(), note: col.text().nullable() }),
+  })
+  const { session, close } = sqlite()
+  try {
+    const m = new Migrator(session, 'sqlite')
+    const dropLabel = [migration('001_items', empty, indexed), migration('002_drop_label', indexed, stripped)]
+    expect(m.migrateUp([dropLabel[0]!])).toEqual(['001_items'])
+    session.exec(`INSERT INTO "items" ("id", "label") VALUES (1, 'a')`)
+    expect(m.migrateUp(dropLabel)).toEqual(['002_drop_label'])
+    expect(session.all(`SELECT "id" FROM "items"`)).toEqual([{ id: 1 }])
+    expect(() =>
+      m.migrateUp([...dropLabel, { id: '003_unique', up: diffSchema(uniqueCol, noUnique), down: [] }]),
+    ).toThrow(/UNIQUE/)
+    expect(() => m.migrateUp([...dropLabel, { id: '003_pk', up: diffSchema(pkTable, noPk), down: [] }])).toThrow(/PRIMARY KEY/)
+    expect(() => m.migrateUp([...dropLabel, { id: '003_fk', up: diffSchema(withFk, noFk), down: [] }])).toThrow(/foreign key/)
+    expect(() => m.migrateUp([...dropLabel, { id: '003_nn', up: [notNullAdd], down: [] }])).toThrow(/NOT NULL/)
+    const noteChain = [...dropLabel, migration('003_note', stripped, withNote)]
+    expect(m.migrateUp(noteChain)).toEqual(['003_note'])
+    expect(session.all(`SELECT "note" FROM "items"`)).toEqual([{ note: null }])
+    expect(m.migrateDown(noteChain, 1)).toEqual(['003_note'])
+    expect(session.all(`SELECT "id" FROM "items"`)).toEqual([{ id: 1 }])
+  } finally {
+    close()
+  }
+})
+
 test('migrator applies, skips, rolls back, and walks down against sqlite', () => {
   const { session, names, close } = sqlite()
   try {
