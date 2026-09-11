@@ -4,7 +4,7 @@ A from-scratch type-safe ORM and a lab for the relational designs that break nai
 
 ## What this demonstrates
 
-Most ORM tutorials stop at `findMany`. This repo goes the other way. It builds the internals of a small ORM (query builder, parameter binding, later migrations, relations, and a unit of work) and then uses that machinery against schemas that are actually hard: multi-tenant isolation, bitemporal history, trees, money, and soft delete. The point is to see where typed query construction earns its keep and where you should write SQL by hand.
+Most ORM tutorials stop at `findMany`. This repo goes the other way. It builds the internals of a small ORM (query builder, parameter binding, migrations, relations, and later a unit of work) and then uses that machinery against schemas that are actually hard: multi-tenant isolation, bitemporal history, trees, money, and soft delete. The point is to see where typed query construction earns its keep and where you should write SQL by hand.
 
 ## Concepts demonstrated
 
@@ -22,11 +22,17 @@ Most ORM tutorials stop at `findMany`. This repo goes the other way. It builds t
 - Migration journal with a zero-padded id prefix invariant
 - Dialect type mapping (`BOOLEAN`/`TIMESTAMPTZ` vs SQLite `INTEGER`/`TEXT`)
 - Expand/contract: in-place column ALTER is rejected; drop and add instead
+- N+1 query problem versus batched eager loading
+- `hasMany` / `belongsTo` cardinality (1:N nested arrays, N:1 nullable parent)
+- Hash join in the client: `IN (...)` then group by foreign key
+- Identity map so two children share one parent object
+- JOIN cartesian product vs two-query nesting (parent rows are not duplicated)
 
 ## What's implemented
 
 - Type-safe SELECT/WHERE/JOIN query builder with prepared-statement binding
 - Declarative schema DSL + migration runner with up/down and a diff generator
+- hasMany/belongsTo relations with eager loading to kill the N+1 problem
 
 ## Usage
 
@@ -67,6 +73,23 @@ const to = defineSchema({
 })
 new Migrator(session, 'sqlite').migrateUp([{ id: '001_init', up: diffSchema(from, to), down: diffSchema(to, from) }])
 ```
+
+Relations are declared once. Loading N parents then looping `WHERE userId = parent.id` is N extra queries. `eagerHasMany` compiles one `WHERE userId IN (...)` with unique keys, then nests children in memory. `belongsTo` does the inverse and reuses one parent object per id.
+
+```ts
+import { belongsTo, eagerHasMany, hasMany } from 'orm-workbench'
+
+const userOrders = hasMany('orders', users, orders, users.id, orders.userId)
+const orderUser = belongsTo('user', orders, users, orders.userId, users.id)
+
+const graph = eagerHasMany(session, userOrders, parents, {
+  id: orders.id,
+  userId: orders.userId,
+  totalCents: orders.totalCents,
+}, { dialect: 'sqlite', orderBy: orders.id })
+```
+
+A JOIN of users to orders repeats every user column once per order. The two-query path keeps parent rows unique and attaches `orders: []` when a user has none.
 
 ```bash
 pnpm install
