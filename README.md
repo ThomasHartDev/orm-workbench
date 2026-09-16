@@ -27,12 +27,18 @@ Most ORM tutorials stop at `findMany`. This repo goes the other way. It builds t
 - Hash join in the client: `IN (...)` then group by foreign key
 - Identity map so two children share one parent object
 - JOIN cartesian product vs two-query nesting (parent rows are not duplicated)
+- Unit of work: batches inserts/updates/deletes and flushes them as one transaction
+- Session-scoped identity map so repeated loads of the same row return one object
+- Snapshot-based dirty checking (diff the live object against its load-time snapshot, no proxies)
+- Nested transactions via SQL `SAVEPOINT`/`RELEASE`/`ROLLBACK TO`, since real nested `BEGIN` isn't a thing
+- Partial rollback: an inner failure unwinds to its savepoint without discarding the outer transaction
 
 ## What's implemented
 
 - Type-safe SELECT/WHERE/JOIN query builder with prepared-statement binding
 - Declarative schema DSL + migration runner with up/down and a diff generator
 - hasMany/belongsTo relations with eager loading to kill the N+1 problem
+- Unit-of-work / identity map for change tracking, with nested transactions via savepoints
 
 ## Usage
 
@@ -90,6 +96,23 @@ const graph = eagerHasMany(session, userOrders, parents, {
 ```
 
 A JOIN of users to orders repeats every user column once per order. The two-query path keeps parent rows unique and attaches `orders: []` when a user has none.
+
+A `UnitOfWork` tracks entities you load or create, batches the resulting SQL, and flushes them in one transaction. Loading the same row twice through `attach()` returns the same object instead of a second copy, and a plain field write is enough to mark it dirty: flush diffs the object against the snapshot it took at load time and only sends the columns that changed.
+
+```ts
+import { TransactionManager, UnitOfWork } from 'orm-workbench'
+
+const tx = new TransactionManager(session)
+const uow = new UnitOfWork(session, 'sqlite', tx)
+
+const pat = uow.attach(users, 'id', session.all('SELECT * FROM users WHERE id = ?', [1])[0])
+pat.email = 'pat@new.com'
+
+const draft = uow.registerNew(orders, 'id', { id: 42, userId: 1, totalCents: 900 })
+uow.flush() // one BEGIN/COMMIT: an UPDATE for pat, an INSERT for the order
+```
+
+`TransactionManager.run()` nests correctly: SQLite and Postgres don't support a second real `BEGIN`, so past the outermost call it issues `SAVEPOINT`/`RELEASE SAVEPOINT` instead. If the inner block throws, `ROLLBACK TO SAVEPOINT` undoes only that block; the outer transaction is still live and can catch the error and keep going, or commit what came before it.
 
 ```bash
 pnpm install
