@@ -4,7 +4,7 @@ A from-scratch type-safe ORM and a lab for the relational designs that break nai
 
 ## What this demonstrates
 
-Most ORM tutorials stop at `findMany`. This repo goes the other way. It builds the internals of a small ORM (query builder, parameter binding, migrations, relations, and later a unit of work) and then uses that machinery against schemas that are actually hard: multi-tenant isolation, bitemporal history, trees, money, and soft delete. The point is to see where typed query construction earns its keep and where you should write SQL by hand.
+Most ORM tutorials stop at `findMany`. This repo goes the other way. It builds the internals of a small ORM (query builder, parameter binding, migrations, relations, and a unit of work) and then uses that machinery against schemas that are actually hard: multi-tenant isolation, bitemporal history, trees, money, and soft delete. The point is to see where typed query construction earns its keep and where you should write SQL by hand. The catalog schema is that lab: every lookup is `(tenantId, id)`, the category tree is a closure table, prices are integer minor units, and live rows are `deletedAt IS NULL`.
 
 ## Concepts demonstrated
 
@@ -32,6 +32,14 @@ Most ORM tutorials stop at `findMany`. This repo goes the other way. It builds t
 - Snapshot-based dirty checking (diff the live object against its load-time snapshot, no proxies)
 - Nested transactions via SQL `SAVEPOINT`/`RELEASE`/`ROLLBACK TO`, since real nested `BEGIN` isn't a thing
 - Partial rollback: an inner failure unwinds to its savepoint without discarding the outer transaction
+- Multi-tenant isolation via composite identity `(tenant_id, id)` on every row
+- Tenant-scoped lookups so a foreign id is not found (no cross-tenant existence leak)
+- Closure table (transitive closure) for trees: ancestor, descendant, depth
+- Cycle detection on reparent: refuse a parent that already sits in the subtree
+- Integer money (minor units + ISO 4217); never `REAL` / IEEE-754 for currency
+- Largest-remainder allocation so split pennies still sum to the original amount
+- Soft delete (`deleted_at` NULL vs timestamp) and SQL three-valued logic (`IS NULL`)
+- Partial unique index `WHERE deleted_at IS NULL` so a live SKU can be reused after delete
 
 ## What's implemented
 
@@ -39,6 +47,7 @@ Most ORM tutorials stop at `findMany`. This repo goes the other way. It builds t
 - Declarative schema DSL + migration runner with up/down and a diff generator
 - hasMany/belongsTo relations with eager loading to kill the N+1 problem
 - Unit-of-work / identity map for change tracking, with nested transactions via savepoints
+- A complex reference schema: multi-tenant + hierarchies + money type + soft-delete
 
 ## Usage
 
@@ -113,6 +122,23 @@ uow.flush() // one BEGIN/COMMIT: an UPDATE for pat, an INSERT for the order
 ```
 
 `TransactionManager.run()` nests correctly: SQLite and Postgres don't support a second real `BEGIN`, so past the outermost call it issues `SAVEPOINT`/`RELEASE SAVEPOINT` instead. If the inner block throws, `ROLLBACK TO SAVEPOINT` undoes only that block; the outer transaction is still live and can catch the error and keep going, or commit what came before it.
+
+The catalog is the hard schema. `categories_tenant_id_uq` and `products_tenant_id_uq` are the tenant-local identity the DSL can declare. A composite foreign key `(tenant_id, category_id)` is what you would add in hand-written Postgres; this DSL still emits single-column FKs, so `Catalog` loads parents with `WHERE tenantId = ? AND id = ?` and treats a cross-tenant id as missing. Trees use `category_tree` (closure table) instead of `LIKE '/1/1/%'`, which would also match `/1/11/`. Money is `{ minor, currency }`. Live uniqueness is a partial unique index, which the DSL cannot express, so `applyCatalogSchema` runs that `CREATE UNIQUE INDEX ... WHERE "deletedAt" IS NULL` as extra SQL.
+
+```ts
+import { applyCatalogSchema, Catalog, liveProductsQuery, money } from 'orm-workbench'
+
+applyCatalogSchema(session, 'sqlite')
+const catalog = new Catalog(session, 'sqlite')
+catalog.createTenant(1, 'acme')
+catalog.createCategory(10, 1, 'root')
+catalog.createCategory(11, 1, 'shoes', 10)
+catalog.createProduct(1, 1, 11, 'SKU-1', money(1999, 'USD'))
+catalog.softDeleteProduct(1, 1)
+
+liveProductsQuery(1).compile('postgres').sql
+// WHERE "products"."tenantId" = $1 AND "products"."deletedAt" IS NULL
+```
 
 ```bash
 pnpm install
