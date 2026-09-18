@@ -98,6 +98,26 @@ test('closure table descendants, reparent, and cycle detection stay inside the t
   db.close()
 })
 
+test('reparenting a live subtree to null makes a new root and keeps its descendants', () => {
+  const db = sqlite()
+  db.catalog.createTenant(1, 'acme')
+  db.catalog.createCategory(1, 1, 'root')
+  db.catalog.createCategory(2, 1, 'child', 1)
+  db.catalog.createCategory(3, 1, 'leaf', 2)
+  db.catalog.reparentCategory(1, 2, null)
+  expect(db.catalog.descendants(1, 1)).toEqual([])
+  expect(db.catalog.descendants(1, 2)).toEqual([{ id: 3, name: 'leaf', depth: 1 }])
+  expect(
+    db.session.all(`SELECT "parentId" FROM "categories" WHERE "tenantId" = ? AND "id" = ?`, [1, 2])[0],
+  ).toEqual({ parentId: null })
+  db.catalog.reparentCategory(1, 1, null)
+  expect(
+    db.session.all(`SELECT "parentId" FROM "categories" WHERE "tenantId" = ? AND "id" = ?`, [1, 1])[0],
+  ).toEqual({ parentId: null })
+  expect(db.catalog.descendants(1, 1)).toEqual([])
+  db.close()
+})
+
 test('soft-delete hides live rows, frees the SKU, and blocks restore on a taken SKU', () => {
   const db = sqlite()
   db.catalog.createTenant(1, 'acme')

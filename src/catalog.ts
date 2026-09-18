@@ -180,12 +180,14 @@ export class Catalog {
 
   reparentCategory(tenantId: number, id: number, parentId: number | null): void {
     this.requireLiveCategory(tenantId, id)
-    if (parentId !== null) this.requireLiveCategory(tenantId, parentId)
-    const cycle = this.session.all(
-      `SELECT 1 AS ok FROM "category_tree" WHERE "tenantId" = ${this.ph(1)} AND "ancestorId" = ${this.ph(2)} AND "descendantId" = ${this.ph(3)}`,
-      [tenantId, id, parentId ?? id],
-    )
-    if (cycle[0]) throw new Error('Cycle: new parent is inside the subtree')
+    if (parentId !== null) {
+      this.requireLiveCategory(tenantId, parentId)
+      const cycle = this.session.all(
+        `SELECT 1 AS ok FROM "category_tree" WHERE "tenantId" = ${this.ph(1)} AND "ancestorId" = ${this.ph(2)} AND "descendantId" = ${this.ph(3)}`,
+        [tenantId, id, parentId],
+      )
+      if (cycle[0]) throw new Error('Cycle: new parent is inside the subtree')
+    }
     // SQLite forbids reading category_tree in the same DELETE; wrap the subtree ids.
     this.session.exec(
       `DELETE FROM "category_tree" WHERE "tenantId" = ${this.ph(1)} AND "descendantId" IN (SELECT "descendantId" FROM (SELECT "descendantId" FROM "category_tree" WHERE "tenantId" = ${this.ph(2)} AND "ancestorId" = ${this.ph(3)})) AND "ancestorId" NOT IN (SELECT "descendantId" FROM (SELECT "descendantId" FROM "category_tree" WHERE "tenantId" = ${this.ph(4)} AND "ancestorId" = ${this.ph(5)}))`,
